@@ -5,6 +5,12 @@ import { currentUser } from "@clerk/nextjs/server";
 import { Difficulty } from "@prisma/client";
 import nodemailer from "nodemailer";
 
+//new
+import Groq from "groq-sdk";
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
 export const onAuthenticate = async () => {
   try {
     const authUser = await currentUser();
@@ -252,64 +258,124 @@ async function fetchAndExtractText(fileUrl: string) {
 //   }
 // }
 
-async function sendTextToDeepseekForQuizGeneration(
+//newer: i fixed an error... json not supported
+async function sendTextToGroqForQuizGeneration(
   text: string,
   numQuestions: number,
   difficulty: string
 ) {
   if (text.length < 100) {
-    console.error("Text must be at least 100 characters for OpenAI.");
+    console.error("Text must be at least 100 characters.");
     return null;
   }
 
-  const requestBody = {
-    model: "deepseek/deepseek-r1:free",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are an AI that generates quizzes from provided text. Output JSON with unique question IDs, multiple-choice options, and correct answers.",
-      },
-      {
-        role: "user",
-        content: `Generate a ${difficulty} quiz with ${numQuestions} questions based on this text. Output in JSON format like this:
-        [
-          { "id": "q1", "question": "What is the capital of France?", "options": ["Paris", "London", "Berlin", "Madrid"], "correctAnswer": "Paris" }
-        ]
-        Text:
-        ${text}`,
-      },
-    ],
-    temperature: 0.7,
-  };
+  let rawContent = ""; // Declare outside try block
 
   try {
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an AI that generates quizzes from provided text. Output ONLY valid JSON array with unique question IDs, multiple-choice options, and correct answers. Do not include any explanatory text before or after the JSON.",
         },
-        body: JSON.stringify(requestBody),
-      }
-    );
+        {
+          role: "user",
+          content: `Generate a ${difficulty} quiz with ${numQuestions} questions based on this text. Output ONLY the JSON array, nothing else. Format:
+[
+  { "id": "q1", "question": "What is the capital of France?", "options": ["Paris", "London", "Berlin", "Madrid"], "correctAnswer": "Paris" }
+]
 
-    const data = await response.json();
-    console.log("OpenRouter Quiz Response:", data);
+Text:
+${text}`,
+        },
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 8192,
+    });
 
-    const rawContent = data.choices?.[0]?.message?.content || "[]";
+    rawContent = chatCompletion.choices[0]?.message?.content || "[]";
+    console.log("Groq Quiz Response:", rawContent);
 
-    // **Sanitize the response to remove markdown formatting**
-    const cleanedContent = rawContent.replace(/^```json\n|\n```$/g, "").trim();
+    // More aggressive sanitization to extract JSON
+    let cleanedContent = rawContent.trim();
 
-    return JSON.parse(cleanedContent);
+    // Remove markdown code blocks
+    cleanedContent = cleanedContent
+      .replace(/^```json\n?/g, "")
+      .replace(/\n?```$/g, "");
+
+    // Find the first '[' and last ']' to extract just the JSON array
+    const firstBracket = cleanedContent.indexOf("[");
+    const lastBracket = cleanedContent.lastIndexOf("]");
+
+    if (firstBracket !== -1 && lastBracket !== -1) {
+      cleanedContent = cleanedContent.substring(firstBracket, lastBracket + 1);
+    }
+
+    const parsedQuestions = JSON.parse(cleanedContent);
+
+    // Validate that we got an array
+    if (!Array.isArray(parsedQuestions)) {
+      console.error("Response is not an array:", parsedQuestions);
+      return [];
+    }
+
+    return parsedQuestions;
   } catch (error) {
-    console.error("Error fetching or parsing quiz:", error);
+    console.error("Error fetching or parsing quiz from Groq:", error);
+    console.error("Raw content that failed to parse:", rawContent);
     return [];
   }
 }
+
+// new
+// async function sendTextToGroqForQuizGeneration(
+//   text: string,
+//   numQuestions: number,
+//   difficulty: string
+// ) {
+//   if (text.length < 100) {
+//     console.error("Text must be at least 100 characters.");
+//     return null;
+//   }
+
+//   try {
+//     const chatCompletion = await groq.chat.completions.create({
+//       messages: [
+//         {
+//           role: "system",
+//           content:
+//             "You are an AI that generates quizzes from provided text. Output JSON with unique question IDs, multiple-choice options, and correct answers.",
+//         },
+//         {
+//           role: "user",
+//           content: `Generate a ${difficulty} quiz with ${numQuestions} questions based on this text. Output in JSON format like this:
+//           [
+//             { "id": "q1", "question": "What is the capital of France?", "options": ["Paris", "London", "Berlin", "Madrid"], "correctAnswer": "Paris" }
+//           ]
+//           Text:
+//           ${text}`,
+//         },
+//       ],
+//       model: "llama-3.3-70b-versatile", // Popular Groq model for general tasks
+//       temperature: 0.7,
+//       max_tokens: 8192,
+//     });
+
+//     const rawContent = chatCompletion.choices[0]?.message?.content || "[]";
+//     console.log("Groq Quiz Response:", rawContent);
+
+//     // Sanitize the response to remove markdown formatting
+//     const cleanedContent = rawContent.replace(/^```json\n|\n```$/g, "").trim();
+
+//     return JSON.parse(cleanedContent);
+//   } catch (error) {
+//     console.error("Error fetching or parsing quiz from Groq:", error);
+//     return [];
+//   }
+// }
 
 async function generateQuizFromText(
   fileUrl: string,
@@ -318,13 +384,87 @@ async function generateQuizFromText(
 ) {
   const text = await fetchAndExtractText(fileUrl);
   if (text) {
-    // return sendTextToDeepseekForQuizGeneration(text, numQuestions, difficulty);
-    return sendTextToDeepseekForQuizGeneration(text, numQuestions, difficulty);
+    return sendTextToGroqForQuizGeneration(text, numQuestions, difficulty);
   }
 
   console.log("No text extracted ❌");
   return null;
 }
+
+// old
+// async function sendTextToDeepseekForQuizGeneration(
+//   text: string,
+//   numQuestions: number,
+//   difficulty: string
+// ) {
+//   if (text.length < 100) {
+//     console.error("Text must be at least 100 characters for OpenAI.");
+//     return null;
+//   }
+
+//   const requestBody = {
+//     model: "deepseek/deepseek-r1:free",
+//     messages: [
+//       {
+//         role: "system",
+//         content:
+//           "You are an AI that generates quizzes from provided text. Output JSON with unique question IDs, multiple-choice options, and correct answers.",
+//       },
+//       {
+//         role: "user",
+//         content: `Generate a ${difficulty} quiz with ${numQuestions} questions based on this text. Output in JSON format like this:
+//         [
+//           { "id": "q1", "question": "What is the capital of France?", "options": ["Paris", "London", "Berlin", "Madrid"], "correctAnswer": "Paris" }
+//         ]
+//         Text:
+//         ${text}`,
+//       },
+//     ],
+//     temperature: 0.7,
+//   };
+
+//   try {
+//     const response = await fetch(
+//       "https://openrouter.ai/api/v1/chat/completions",
+//       {
+//         method: "POST",
+//         headers: {
+//           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+//           "Content-Type": "application/json",
+//         },
+//         body: JSON.stringify(requestBody),
+//       }
+//     );
+
+//     const data = await response.json();
+//     console.log("OpenRouter Quiz Response:", data);
+
+//     const rawContent = data.choices?.[0]?.message?.content || "[]";
+
+//     // **Sanitize the response to remove markdown formatting**
+//     const cleanedContent = rawContent.replace(/^```json\n|\n```$/g, "").trim();
+
+//     return JSON.parse(cleanedContent);
+//   } catch (error) {
+//     console.error("Error fetching or parsing quiz:", error);
+//     return [];
+//   }
+// }
+
+// async function generateQuizFromText(
+//   fileUrl: string,
+//   numQuestions: number,
+//   difficulty: string
+// ) {
+//   const text = await fetchAndExtractText(fileUrl);
+//   if (text) {
+//     // return sendTextToDeepseekForQuizGeneration(text, numQuestions, difficulty);
+//     return sendTextToDeepseekForQuizGeneration(text, numQuestions, difficulty);
+//   }
+
+//   console.log("No text extracted ❌");
+//   return null;
+// }
 
 export const createQuiz = async (
   data: {
@@ -664,83 +804,169 @@ export const getQuizWithQuestions = async (quizId: string) => {
 //   }
 // }
 
-async function sendTextToDeepseekForFlashCardGeneration(
+// new
+async function sendTextToGroqForFlashCardGeneration(
   text: string,
   numCards: number
-  // difficulty?: string
 ) {
   if (text.length < 100) {
-    console.error("Text must be at least 100 characters for OpenAI.");
+    console.error("Text must be at least 100 characters.");
     return null;
   }
 
-  const requestBody = {
-    model: "deepseek/deepseek-r1:free",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are an AI that generates flashcards from provided text. Output JSON with unique card IDs, front (question), and back (answer).",
-      },
-      {
-        role: "user",
-        content: `Generate a flashcard set with ${numCards} cards based on this text. Output in JSON format like this:
-        [
-          {
-            "id": "c1",
-            "front": "What is a derivative?",
-            "back": "A derivative measures the rate at which a function is changing at a given point. It represents the slope of the tangent line to the function at that point."
-          }
-        ]
-        Text:
-        ${text}`,
-      },
-    ],
-    temperature: 0.7,
-  };
+  let rawContent = ""; // Declare outside try block for error logging
 
   try {
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an AI that generates flashcards from provided text. Output ONLY valid JSON array with unique card IDs, front (question), and back (answer). Do not include any explanatory text before or after the JSON.",
         },
-        body: JSON.stringify(requestBody),
-      }
-    );
+        {
+          role: "user",
+          content: `Generate a flashcard set with ${numCards} cards based on this text. Output ONLY the JSON array, nothing else. Format:
+[
+  {
+    "id": "c1",
+    "front": "What is a derivative?",
+    "back": "A derivative measures the rate at which a function is changing at a given point. It represents the slope of the tangent line to the function at that point."
+  }
+]
 
-    const data = await response.json();
-    console.log("OpenRouter Flashcard Response:", data);
+Text:
+${text}`,
+        },
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 8192,
+    });
 
-    const rawContent = data.choices?.[0]?.message?.content || "[]";
+    rawContent = chatCompletion.choices[0]?.message?.content || "[]";
+    console.log("Groq Flashcard Response:", rawContent);
 
-    // **Sanitize the response to remove markdown formatting**
-    const cleanedContent = rawContent.replace(/^```json\n|\n```$/g, "").trim();
+    // More aggressive sanitization to extract JSON
+    let cleanedContent = rawContent.trim();
 
-    return JSON.parse(cleanedContent);
+    // Remove markdown code blocks
+    cleanedContent = cleanedContent
+      .replace(/^```json\n?/g, "")
+      .replace(/\n?```$/g, "");
+
+    // Find the first '[' and last ']' to extract just the JSON array
+    const firstBracket = cleanedContent.indexOf("[");
+    const lastBracket = cleanedContent.lastIndexOf("]");
+
+    if (firstBracket !== -1 && lastBracket !== -1) {
+      cleanedContent = cleanedContent.substring(firstBracket, lastBracket + 1);
+    }
+
+    const parsedFlashcards = JSON.parse(cleanedContent);
+
+    // Validate that we got an array
+    if (!Array.isArray(parsedFlashcards)) {
+      console.error("Response is not an array:", parsedFlashcards);
+      return [];
+    }
+
+    return parsedFlashcards;
   } catch (error) {
-    console.error("Error fetching or parsing flashcards:", error);
+    console.error("Error fetching or parsing flashcards from Groq:", error);
+    console.error("Raw content that failed to parse:", rawContent);
     return [];
   }
 }
 
-async function generateFlashcardsFromText(
-  fileUrl: string,
-  numCards: number
-  // difficulty: string
-) {
-  const text = await fetchAndExtractText(fileUrl); // Assuming fetchAndExtractText is already implemented
+async function generateFlashcardsFromText(fileUrl: string, numCards: number) {
+  const text = await fetchAndExtractText(fileUrl);
   if (text) {
-    // return sendTextToDeepseekForFlashCardGeneration(text, numCards, difficulty);
-    return sendTextToDeepseekForFlashCardGeneration(text, numCards);
+    return sendTextToGroqForFlashCardGeneration(text, numCards);
   }
 
   console.log("No text extracted ❌");
   return null;
 }
+
+// old
+// async function sendTextToDeepseekForFlashCardGeneration(
+//   text: string,
+//   numCards: number
+//   // difficulty?: string
+// ) {
+//   if (text.length < 100) {
+//     console.error("Text must be at least 100 characters for OpenAI.");
+//     return null;
+//   }
+
+//   const requestBody = {
+//     model: "deepseek/deepseek-r1:free",
+//     messages: [
+//       {
+//         role: "system",
+//         content:
+//           "You are an AI that generates flashcards from provided text. Output JSON with unique card IDs, front (question), and back (answer).",
+//       },
+//       {
+//         role: "user",
+//         content: `Generate a flashcard set with ${numCards} cards based on this text. Output in JSON format like this:
+//         [
+//           {
+//             "id": "c1",
+//             "front": "What is a derivative?",
+//             "back": "A derivative measures the rate at which a function is changing at a given point. It represents the slope of the tangent line to the function at that point."
+//           }
+//         ]
+//         Text:
+//         ${text}`,
+//       },
+//     ],
+//     temperature: 0.7,
+//   };
+
+//   try {
+//     const response = await fetch(
+//       "https://openrouter.ai/api/v1/chat/completions",
+//       {
+//         method: "POST",
+//         headers: {
+//           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+//           "Content-Type": "application/json",
+//         },
+//         body: JSON.stringify(requestBody),
+//       }
+//     );
+
+//     const data = await response.json();
+//     console.log("OpenRouter Flashcard Response:", data);
+
+//     const rawContent = data.choices?.[0]?.message?.content || "[]";
+
+//     // **Sanitize the response to remove markdown formatting**
+//     const cleanedContent = rawContent.replace(/^```json\n|\n```$/g, "").trim();
+
+//     return JSON.parse(cleanedContent);
+//   } catch (error) {
+//     console.error("Error fetching or parsing flashcards:", error);
+//     return [];
+//   }
+// }
+
+// async function generateFlashcardsFromText(
+//   fileUrl: string,
+//   numCards: number
+//   // difficulty: string
+// ) {
+//   const text = await fetchAndExtractText(fileUrl); // Assuming fetchAndExtractText is already implemented
+//   if (text) {
+//     // return sendTextToDeepseekForFlashCardGeneration(text, numCards, difficulty);
+//     return sendTextToDeepseekForFlashCardGeneration(text, numCards);
+//   }
+
+//   console.log("No text extracted ❌");
+//   return null;
+// }
 
 export const createFlashcardSet = async (
   data: {

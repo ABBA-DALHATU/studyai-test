@@ -196,7 +196,7 @@ export default function DashboardPage() {
                     className="w-full group"
                     asChild
                   >
-                    <a href="/library">
+                    <a href={`/dashboard/${workspaceId}/library`}>
                       <Plus className="mr-2 h-4 w-4 group-hover:rotate-90 transition-transform" />
                       Add Document
                     </a>
@@ -224,7 +224,7 @@ export default function DashboardPage() {
                     className="w-full group"
                     asChild
                   >
-                    <a href="/quizzes">
+                    <a href={`/dashboard/${workspaceId}/quizzes`}>
                       <Plus className="mr-2 h-4 w-4 group-hover:rotate-90 transition-transform" />
                       Create Quiz
                     </a>
@@ -256,7 +256,8 @@ export default function DashboardPage() {
                     className="w-full group"
                     asChild
                   >
-                    <a href="/flashcards">
+                    <a href={`/dashboard/${workspaceId}/flashcards`}>
+                      {/* http://localhost:3000/dashboard/2799a5b3-351f-45c8-a2ff-2da0f674cbde/library */}
                       <Plus className="mr-2 h-4 w-4 group-hover:rotate-90 transition-transform" />
                       Create Flashcards
                     </a>
